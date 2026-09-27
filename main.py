@@ -4,11 +4,10 @@ import logging
 import psycopg2
 
 try:
-    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
     from telegram.ext import (
         Application,
         CommandHandler,
-        CallbackQueryHandler,
         MessageHandler,
         ContextTypes,
         ConversationHandler,
@@ -31,6 +30,13 @@ ADMIN_IDS = [int(i.strip()) for i in os.getenv("ADMIN_IDS", "").split(",") if i.
 MAX_NUMBERS = 3500
 
 WAITING_CHECK_NUM, WAITING_RESERVE_NUM = range(2)
+
+# Button Text Constants
+BTN_CHECK = "🔍 Check Number"
+BTN_LIST = "📋 List Numbers"
+BTN_RESERVE = "📌 Reserve Number"
+BTN_RESERVED_LIST = "📑 Reserved List"
+BTN_STATUS = "📊 Lotto Status"
 
 # ---------------------------------------------------------
 # DATABASE HELPERS
@@ -107,48 +113,24 @@ def get_reserved_list():
     return [r[0] for r in rows]
 
 # ---------------------------------------------------------
-# TABBED NAVIGATION KEYBOARD BUILDER
+# CUSTOM KEYBOARD BUILDER
 # ---------------------------------------------------------
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
-def build_tabbed_keyboard(user_id: int, active_tab: str) -> InlineKeyboardMarkup:
-    """Builds a tabbed navigation bar highlighting the active tab."""
-    
-    # Define Tab Headers with visual indicator for active tab
-    check_label = "🔘 Check" if active_tab == "check" else "🔍 Check"
-    list_label = "🔘 List" if active_tab == "list" else "📋 List"
-    reserve_label = "🔘 Reserve" if active_tab == "reserve" else "📌 Reserve"
-    res_list_label = "🔘 Reserved List" if active_tab == "reserved_list" else "📑 Reserved List"
-    status_label = "🔘 Status" if active_tab == "status" else "📊 Status"
-
+def build_custom_keyboard(user_id: int) -> ReplyKeyboardMarkup:
+    """Builds a persistent bottom custom keyboard layout."""
     if is_admin(user_id):
-        # Admin gets full tab bar layout
         keyboard = [
-            # Tab Bar Row 1
-            [
-                InlineKeyboardButton(check_label, callback_data="tab_check"),
-                InlineKeyboardButton(reserve_label, callback_data="tab_reserve"),
-            ],
-            # Tab Bar Row 2
-            [
-                InlineKeyboardButton(list_label, callback_data="tab_list"),
-                InlineKeyboardButton(res_list_label, callback_data="tab_reserved_list"),
-            ],
-            # Tab Bar Row 3
-            [
-                InlineKeyboardButton(status_label, callback_data="tab_status"),
-            ]
+            [KeyboardButton(BTN_CHECK), KeyboardButton(BTN_RESERVE)],
+            [KeyboardButton(BTN_LIST), KeyboardButton(BTN_RESERVED_LIST)],
+            [KeyboardButton(BTN_STATUS)]
         ]
     else:
-        # Regular users get public tabs only
         keyboard = [
-            [
-                InlineKeyboardButton(check_label, callback_data="tab_check"),
-                InlineKeyboardButton(list_label, callback_data="tab_list"),
-            ]
+            [KeyboardButton(BTN_CHECK), KeyboardButton(BTN_LIST)]
         ]
-    return InlineKeyboardMarkup(keyboard)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 # ---------------------------------------------------------
 # HANDLERS
@@ -158,101 +140,95 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     role = "👑 Admin" if is_admin(user.id) else "👤 User"
     
     await update.message.reply_text(
-        f" Welcome to Car Lottery Bot!\nRole: {role}\n\nSelect a tab below to switch views:",
-        reply_markup=build_tabbed_keyboard(user.id, active_tab="check")
+        f"Welcome to Car Lottery Bot!\nRole: {role}\n\nUse the custom keyboard below to navigate:",
+        reply_markup=build_custom_keyboard(user.id)
     )
     return ConversationHandler.END
 
-async def tab_switch_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    action = query.data
+async def menu_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    text = update.message.text
 
-    # Security check for admin tabs
-    admin_tabs = ["tab_reserve", "tab_reserved_list", "tab_status"]
-    if action in admin_tabs and not is_admin(user_id):
-        await query.edit_message_text(
-            "⛔ **Access Denied**: Admins only.",
-            reply_markup=build_tabbed_keyboard(user_id, active_tab="check"),
-            parse_mode="Markdown"
-        )
-        return ConversationHandler.END
-
-    # Tab 1: Check Number
-    if action == "tab_check":
-        await query.edit_message_text(
-            f"--- 📌 **TAB: CHECK NUMBER** ---\n\n"
-            f"Please reply with the ticket number you want to check (1 - {MAX_NUMBERS}):",
-            reply_markup=build_tabbed_keyboard(user_id, active_tab="check"),
-            parse_mode="Markdown"
+    # Route: Check Number
+    if text == BTN_CHECK:
+        await update.message.reply_text(
+            f"Please enter the ticket number you want to check (1 - {MAX_NUMBERS}):",
+            reply_markup=build_custom_keyboard(user_id)
         )
         return WAITING_CHECK_NUM
 
-    # Tab 2: Reserve Number (Admin)
-    elif action == "tab_reserve":
-        await query.edit_message_text(
-            f"--- 📌 **TAB: RESERVE NUMBER** ---\n\n"
-            f"Please reply with the ticket number you want to reserve (1 - {MAX_NUMBERS}):",
-            reply_markup=build_tabbed_keyboard(user_id, active_tab="reserve"),
-            parse_mode="Markdown"
+    # Route: Reserve Number (Admin Only)
+    elif text == BTN_RESERVE:
+        if not is_admin(user_id):
+            await update.message.reply_text("⛔ **Access Denied**: Admins only.", reply_markup=build_custom_keyboard(user_id), parse_mode="Markdown")
+            return ConversationHandler.END
+            
+        await update.message.reply_text(
+            f"Please enter the ticket number you want to reserve (1 - {MAX_NUMBERS}):",
+            reply_markup=build_custom_keyboard(user_id)
         )
         return WAITING_RESERVE_NUM
 
-    # Tab 3: List Overview
-    elif action == "tab_list":
+    # Route: List Numbers
+    elif text == BTN_LIST:
         avail, res = get_stats()
-        await query.edit_message_text(
-            f"--- 📋 **TAB: TICKETS OVERVIEW** ---\n\n"
+        await update.message.reply_text(
+            f"📋 **Lotto Numbers Overview**\n\n"
             f"• Total Tickets: {MAX_NUMBERS}\n"
             f"• Available: {avail}\n"
             f"• Reserved: {res}",
-            reply_markup=build_tabbed_keyboard(user_id, active_tab="list"),
+            reply_markup=build_custom_keyboard(user_id),
             parse_mode="Markdown"
         )
         return ConversationHandler.END
 
-    # Tab 4: Reserved List (Admin)
-    elif action == "tab_reserved_list":
+    # Route: Reserved List (Admin Only)
+    elif text == BTN_RESERVED_LIST:
+        if not is_admin(user_id):
+            await update.message.reply_text("⛔ **Access Denied**: Admins only.", reply_markup=build_custom_keyboard(user_id), parse_mode="Markdown")
+            return ConversationHandler.END
+
         res_list = get_reserved_list()
         if not res_list:
-            text = "--- 📑 **TAB: RESERVED LIST** ---\n\nNo numbers reserved yet."
+            msg = "📑 **Reserved List**: No numbers reserved yet."
         else:
-            text = (
-                f"--- 📑 **TAB: RESERVED LIST ({len(res_list)} total)** ---\n\n"
-                + ", ".join(map(str, res_list[:50]))
-            )
-        await query.edit_message_text(
-            text,
-            reply_markup=build_tabbed_keyboard(user_id, active_tab="reserved_list"),
-            parse_mode="Markdown"
-        )
+            msg = f"📑 **Reserved Numbers ({len(res_list)} total):**\n" + ", ".join(map(str, res_list[:50]))
+            
+        await update.message.reply_text(msg, reply_markup=build_custom_keyboard(user_id), parse_mode="Markdown")
         return ConversationHandler.END
 
-    # Tab 5: Lotto Status (Admin)
-    elif action == "tab_status":
+    # Route: Lotto Status (Admin Only)
+    elif text == BTN_STATUS:
+        if not is_admin(user_id):
+            await update.message.reply_text("⛔ **Access Denied**: Admins only.", reply_markup=build_custom_keyboard(user_id), parse_mode="Markdown")
+            return ConversationHandler.END
+
         avail, res = get_stats()
         pct = (res / MAX_NUMBERS) * 100
-        await query.edit_message_text(
-            f"--- 📊 **TAB: DASHBOARD** ---\n\n"
+        await update.message.reply_text(
+            f"📊 **Car Lottery Dashboard**\n\n"
             f"• Total Tickets: {MAX_NUMBERS}\n"
             f"• Available: {avail}\n"
             f"• Reserved: {res}\n"
             f"• Sales Progress: {pct:.1f}%",
-            reply_markup=build_tabbed_keyboard(user_id, active_tab="status"),
+            reply_markup=build_custom_keyboard(user_id),
             parse_mode="Markdown"
         )
         return ConversationHandler.END
+
+    return ConversationHandler.END
 
 async def process_check_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
+    if text in [BTN_CHECK, BTN_LIST, BTN_RESERVE, BTN_RESERVED_LIST, BTN_STATUS]:
+        return await menu_navigation(update, context)
+
     if not text.isdigit() or not (1 <= int(text) <= MAX_NUMBERS):
         await update.message.reply_text(
-            f"⚠️ Enter a number between 1 and {MAX_NUMBERS}:",
-            reply_markup=build_tabbed_keyboard(user_id, active_tab="check")
+            f"⚠️ Enter a valid number between 1 and {MAX_NUMBERS}:",
+            reply_markup=build_custom_keyboard(user_id)
         )
         return WAITING_CHECK_NUM
 
@@ -260,21 +236,24 @@ async def process_check_number(update: Update, context: ContextTypes.DEFAULT_TYP
     record = get_ticket(num)
     status_msg = f"🟢 Ticket #{num} is AVAILABLE!" if record and record["status"] == "available" else f"🔴 Ticket #{num} is RESERVED."
     
-    await update.message.reply_text(status_msg, reply_markup=build_tabbed_keyboard(user_id, active_tab="check"))
+    await update.message.reply_text(status_msg, reply_markup=build_custom_keyboard(user_id))
     return ConversationHandler.END
 
 async def process_reserve_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
+    if text in [BTN_CHECK, BTN_LIST, BTN_RESERVE, BTN_RESERVED_LIST, BTN_STATUS]:
+        return await menu_navigation(update, context)
+
     if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin action required.", reply_markup=build_tabbed_keyboard(user_id, active_tab="check"))
+        await update.message.reply_text("⛔ Admin action required.", reply_markup=build_custom_keyboard(user_id))
         return ConversationHandler.END
 
     if not text.isdigit() or not (1 <= int(text) <= MAX_NUMBERS):
         await update.message.reply_text(
-            f"⚠️ Enter a number between 1 and {MAX_NUMBERS}:",
-            reply_markup=build_tabbed_keyboard(user_id, active_tab="reserve")
+            f"⚠️ Enter a valid number between 1 and {MAX_NUMBERS}:",
+            reply_markup=build_custom_keyboard(user_id)
         )
         return WAITING_RESERVE_NUM
 
@@ -282,17 +261,17 @@ async def process_reserve_number(update: Update, context: ContextTypes.DEFAULT_T
     if reserve_ticket(num, user_id):
         await update.message.reply_text(
             f"✅ Ticket #{num} successfully reserved in PostgreSQL!",
-            reply_markup=build_tabbed_keyboard(user_id, active_tab="reserve")
+            reply_markup=build_custom_keyboard(user_id)
         )
     else:
         await update.message.reply_text(
             f"⚠️ Ticket #{num} is already reserved!",
-            reply_markup=build_tabbed_keyboard(user_id, active_tab="reserve")
+            reply_markup=build_custom_keyboard(user_id)
         )
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Cancelled.", reply_markup=build_tabbed_keyboard(update.effective_user.id, active_tab="check"))
+    await update.message.reply_text("Cancelled.", reply_markup=build_custom_keyboard(update.effective_user.id))
     return ConversationHandler.END
 
 # ---------------------------------------------------------
@@ -307,7 +286,9 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
     conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(tab_switch_handler)],
+        entry_points=[
+            MessageHandler(filters.TEXT & ~filters.COMMAND, menu_navigation)
+        ],
         states={
             WAITING_CHECK_NUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_check_number)],
             WAITING_RESERVE_NUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_reserve_number)],
@@ -318,7 +299,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv_handler)
 
-    print("🚀 Tabbed Bot running with PostgreSQL persistence...")
+    print("🚀 Custom Keyboard Bot running with PostgreSQL persistence...")
     app.run_polling()
 
 if __name__ == "__main__":
