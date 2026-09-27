@@ -29,7 +29,14 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_IDS = [int(i.strip()) for i in os.getenv("ADMIN_IDS", "").split(",") if i.strip().isdigit()]
 MAX_NUMBERS = 3500
 
-WAITING_CHECK_NUM, WAITING_RESERVE_NUM = range(2)
+# Conversation States
+(
+    WAITING_CHECK_NUM,
+    WAITING_RESERVE_NUM,
+    WAITING_RESERVE_NAME,
+    WAITING_RESERVE_PHONE,
+    WAITING_RESERVE_ADDRESS,
+) = range(5)
 
 # Button Text Labels
 BTN_CHECK = "🔍 Check Number"
@@ -37,6 +44,8 @@ BTN_LIST = "📋 List Numbers"
 BTN_RESERVE = "📌 Reserve Number"
 BTN_RESERVED_LIST = "📑 Reserved List"
 BTN_STATUS = "📊 Lotto Status"
+
+MENU_BUTTONS = [BTN_CHECK, BTN_LIST, BTN_RESERVE, BTN_RESERVED_LIST, BTN_STATUS]
 
 # ---------------------------------------------------------
 # DATABASE HELPERS
@@ -49,20 +58,34 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
+    
+    # Create main tickets table with identity fields
     cur.execute("""
         CREATE TABLE IF NOT EXISTS tickets (
             ticket_num INT PRIMARY KEY,
             status TEXT NOT NULL,
-            reserved_by BIGINT
+            reserved_by BIGINT,
+            reserved_name TEXT,
+            reserved_phone TEXT,
+            reserved_address TEXT
         );
     """)
+    
+    # Auto-migration for existing tables without the new columns
+    cur.execute("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS reserved_name TEXT;")
+    cur.execute("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS reserved_phone TEXT;")
+    cur.execute("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS reserved_address TEXT;")
+    
     cur.execute("SELECT COUNT(*) FROM tickets;")
     count = cur.fetchone()[0]
     
     if count == 0:
         logging.info("Seeding 3,500 tickets into PostgreSQL...")
-        tickets = [(i, "available", None) for i in range(1, MAX_NUMBERS + 1)]
-        cur.executemany("INSERT INTO tickets (ticket_num, status, reserved_by) VALUES (%s, %s, %s);", tickets)
+        tickets = [(i, "available", None, None, None, None) for i in range(1, MAX_NUMBERS + 1)]
+        cur.executemany(
+            "INSERT INTO tickets (ticket_num, status, reserved_by, reserved_name, reserved_phone, reserved_address) VALUES (%s, %s, %s, %s, %s, %s);",
+            tickets
+        )
     
     conn.commit()
     cur.close()
@@ -71,13 +94,25 @@ def init_db():
 def get_ticket(num: int):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("SELECT ticket_num, status, reserved_by FROM tickets WHERE ticket_num = %s;", (num,))
+    cur.execute(
+        "SELECT ticket_num, status, reserved_by, reserved_name, reserved_phone, reserved_address FROM tickets WHERE ticket_num = %s;",
+        (num,)
+    )
     row = cur.fetchone()
     cur.close()
     conn.close()
-    return {"ticket_num": row[0], "status": row[1], "reserved_by": row[2]} if row else None
+    if row:
+        return {
+            "ticket_num": row[0],
+            "status": row[1],
+            "reserved_by": row[2],
+            "reserved_name": row[3],
+            "reserved_phone": row[4],
+            "reserved_address": row[5]
+        }
+    return None
 
-def reserve_ticket(num: int, user_id: int) -> bool:
+def reserve_ticket_full(num: int, user_id: int, name: str, phone: str, address: str) -> bool:
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT status FROM tickets WHERE ticket_num = %s;", (num,))
@@ -88,7 +123,16 @@ def reserve_ticket(num: int, user_id: int) -> bool:
         conn.close()
         return False
         
-    cur.execute("UPDATE tickets SET status = 'reserved', reserved_by = %s WHERE ticket_num = %s;", (user_id, num))
+    cur.execute("""
+        UPDATE tickets 
+        SET status = 'reserved', 
+            reserved_by = %s,
+            reserved_name = %s,
+            reserved_phone = %s,
+            reserved_address = %s
+        WHERE ticket_num = %s;
+    """, (user_id, name, phone, address, num))
+    
     conn.commit()
     cur.close()
     conn.close()
@@ -103,14 +147,19 @@ def get_stats():
     conn.close()
     return (MAX_NUMBERS - reserved, reserved)
 
-def get_reserved_list():
+def get_reserved_list_details():
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("SELECT ticket_num FROM tickets WHERE status = 'reserved' ORDER BY ticket_num ASC;")
+    cur.execute("""
+        SELECT ticket_num, reserved_name, reserved_phone, reserved_address 
+        FROM tickets 
+        WHERE status = 'reserved' 
+        ORDER BY ticket_num ASC;
+    """)
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return [r[0] for r in rows]
+    return rows
 
 # ---------------------------------------------------------
 # REPLY KEYBOARD BUILDER
@@ -131,7 +180,6 @@ def build_reply_keyboard(user_id: int) -> ReplyKeyboardMarkup:
             [KeyboardButton(BTN_CHECK), KeyboardButton(BTN_LIST)]
         ]
     
-    # resize_keyboard=True makes buttons compact rather than full text-block size
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, persistent=True)
 
 # ---------------------------------------------------------
@@ -142,7 +190,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     role = "👑 Admin" if is_admin(user.id) else "👤 User"
     
     await update.message.reply_text(
-        f" Welcome to Car Lottery Bot!\nRole: {role}\n\nUse the reply keyboard at the bottom of your screen to select an option:",
+        f" Welcome to Car Lottery Bot!\nRole: {role}\n\nUse the reply keyboard below to select an option:",
         reply_markup=build_reply_keyboard(user.id)
     )
     return ConversationHandler.END
@@ -151,7 +199,7 @@ async def menu_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_id = update.effective_user.id
     text = update.message.text
 
-    # Action: Check Number
+    # Route: Check Number
     if text == BTN_CHECK:
         await update.message.reply_text(
             f"Please reply with the ticket number you want to check (1 - {MAX_NUMBERS}):",
@@ -159,19 +207,19 @@ async def menu_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return WAITING_CHECK_NUM
 
-    # Action: Reserve Number (Admin Only)
+    # Route: Reserve Number (Admin Only)
     elif text == BTN_RESERVE:
         if not is_admin(user_id):
             await update.message.reply_text("⛔ **Access Denied**: Admins only.", reply_markup=build_reply_keyboard(user_id), parse_mode="Markdown")
             return ConversationHandler.END
             
         await update.message.reply_text(
-            f"Please reply with the ticket number you want to reserve (1 - {MAX_NUMBERS}):",
+            f" Please reply with the ticket number you want to reserve (1 - {MAX_NUMBERS}):",
             reply_markup=build_reply_keyboard(user_id)
         )
         return WAITING_RESERVE_NUM
 
-    # Action: List Numbers
+    # Route: List Numbers Overview
     elif text == BTN_LIST:
         avail, res = get_stats()
         await update.message.reply_text(
@@ -184,22 +232,28 @@ async def menu_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return ConversationHandler.END
 
-    # Action: Reserved List (Admin Only)
+    # Route: Reserved List Details (Admin Only)
     elif text == BTN_RESERVED_LIST:
         if not is_admin(user_id):
             await update.message.reply_text("⛔ **Access Denied**: Admins only.", reply_markup=build_reply_keyboard(user_id), parse_mode="Markdown")
             return ConversationHandler.END
 
-        res_list = get_reserved_list()
+        res_list = get_reserved_list_details()
         if not res_list:
             msg = "📑 **Reserved List**: No numbers reserved yet."
         else:
-            msg = f"📑 **Reserved Numbers ({len(res_list)} total):**\n" + ", ".join(map(str, res_list[:50]))
+            msg = f"📑 **Reserved Numbers ({len(res_list)} total):**\n\n"
+            # Display detailed list for first 20 records to avoid Telegram message size limit
+            for num, name, phone, addr in res_list[:20]:
+                msg += f"• **#{num}**: {name or 'N/A'} | 📞 {phone or 'N/A'} | 📍 {addr or 'N/A'}\n"
             
+            if len(res_list) > 20:
+                msg += f"\n*...and {len(res_list) - 20} more tickets.*"
+
         await update.message.reply_text(msg, reply_markup=build_reply_keyboard(user_id), parse_mode="Markdown")
         return ConversationHandler.END
 
-    # Action: Lotto Status (Admin Only)
+    # Route: Lotto Status (Admin Only)
     elif text == BTN_STATUS:
         if not is_admin(user_id):
             await update.message.reply_text("⛔ **Access Denied**: Admins only.", reply_markup=build_reply_keyboard(user_id), parse_mode="Markdown")
@@ -220,11 +274,14 @@ async def menu_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     return ConversationHandler.END
 
+# ---------------------------------------------------------
+# CHECK TICKET PROCESS
+# ---------------------------------------------------------
 async def process_check_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
-    if text in [BTN_CHECK, BTN_LIST, BTN_RESERVE, BTN_RESERVED_LIST, BTN_STATUS]:
+    if text in MENU_BUTTONS:
         return await menu_navigation(update, context)
 
     if not text.isdigit() or not (1 <= int(text) <= MAX_NUMBERS):
@@ -236,16 +293,28 @@ async def process_check_number(update: Update, context: ContextTypes.DEFAULT_TYP
 
     num = int(text)
     record = get_ticket(num)
-    status_msg = f"🟢 Ticket #{num} is AVAILABLE!" if record and record["status"] == "available" else f"🔴 Ticket #{num} is RESERVED."
     
-    await update.message.reply_text(status_msg, reply_markup=build_reply_keyboard(user_id))
+    if record and record["status"] == "reserved":
+        status_msg = (
+            f"🔴 Ticket #{num} is **RESERVED**.\n"
+            f"👤 Name: {record['reserved_name'] or 'N/A'}\n"
+            f"📞 Phone: {record['reserved_phone'] or 'N/A'}\n"
+            f"📍 Address: {record['reserved_address'] or 'N/A'}"
+        )
+    else:
+        status_msg = f"🟢 Ticket #{num} is **AVAILABLE**!"
+    
+    await update.message.reply_text(status_msg, reply_markup=build_reply_keyboard(user_id), parse_mode="Markdown")
     return ConversationHandler.END
 
+# ---------------------------------------------------------
+# MULTI-STEP RESERVATION PROCESS
+# ---------------------------------------------------------
 async def process_reserve_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
-    if text in [BTN_CHECK, BTN_LIST, BTN_RESERVE, BTN_RESERVED_LIST, BTN_STATUS]:
+    if text in MENU_BUTTONS:
         return await menu_navigation(update, context)
 
     if not is_admin(user_id):
@@ -260,19 +329,86 @@ async def process_reserve_number(update: Update, context: ContextTypes.DEFAULT_T
         return WAITING_RESERVE_NUM
 
     num = int(text)
-    if reserve_ticket(num, user_id):
+    record = get_ticket(num)
+    if record and record["status"] == "reserved":
         await update.message.reply_text(
-            f"✅ Ticket #{num} successfully reserved in PostgreSQL!",
+            f"⚠️ Ticket #{num} is already reserved by {record['reserved_name'] or 'someone'}!",
             reply_markup=build_reply_keyboard(user_id)
+        )
+        return ConversationHandler.END
+
+    # Save target ticket number in user context memory
+    context.user_data["reserve_num"] = num
+    await update.message.reply_text(
+        f"📝 Selected Ticket #{num}.\n\nStep 1/3: Enter the **Full Name** of the person reserving:",
+        reply_markup=build_reply_keyboard(user_id),
+        parse_mode="Markdown"
+    )
+    return WAITING_RESERVE_NAME
+
+async def process_reserve_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    if text in MENU_BUTTONS:
+        return await menu_navigation(update, context)
+
+    context.user_data["reserve_name"] = text
+    await update.message.reply_text(
+        f"Step 2/3: Enter the **Phone Number** for {text}:",
+        reply_markup=build_reply_keyboard(user_id),
+        parse_mode="Markdown"
+    )
+    return WAITING_RESERVE_PHONE
+
+async def process_reserve_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    if text in MENU_BUTTONS:
+        return await menu_navigation(update, context)
+
+    context.user_data["reserve_phone"] = text
+    await update.message.reply_text(
+        f"Step 3/3: Enter the **Address** for {context.user_data.get('reserve_name')}:",
+        reply_markup=build_reply_keyboard(user_id),
+        parse_mode="Markdown"
+    )
+    return WAITING_RESERVE_ADDRESS
+
+async def process_reserve_address(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    if text in MENU_BUTTONS:
+        return await menu_navigation(update, context)
+
+    address = text
+    num = context.user_data.get("reserve_num")
+    name = context.user_data.get("reserve_name")
+    phone = context.user_data.get("reserve_phone")
+
+    if reserve_ticket_full(num, user_id, name, phone, address):
+        await update.message.reply_text(
+            f"✅ **Ticket #{num} Reserved Successfully!**\n\n"
+            f"👤 Name: {name}\n"
+            f"📞 Phone: {phone}\n"
+            f"📍 Address: {address}",
+            reply_markup=build_reply_keyboard(user_id),
+            parse_mode="Markdown"
         )
     else:
         await update.message.reply_text(
-            f"⚠️ Ticket #{num} is already reserved!",
+            f"⚠️ Could not reserve ticket #{num}. It may have already been claimed.",
             reply_markup=build_reply_keyboard(user_id)
         )
+
+    # Clear context memory
+    context.user_data.clear()
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.clear()
     await update.message.reply_text("Cancelled.", reply_markup=build_reply_keyboard(update.effective_user.id))
     return ConversationHandler.END
 
@@ -294,6 +430,9 @@ def main():
         states={
             WAITING_CHECK_NUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_check_number)],
             WAITING_RESERVE_NUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_reserve_number)],
+            WAITING_RESERVE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_reserve_name)],
+            WAITING_RESERVE_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_reserve_phone)],
+            WAITING_RESERVE_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_reserve_address)],
         },
         fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
     )
@@ -301,7 +440,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv_handler)
 
-    print("🚀 Reply Keyboard Bot running...")
+    print("🚀 Car Lottery Bot active with full details reservation...")
     app.run_polling()
 
 if __name__ == "__main__":
