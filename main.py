@@ -31,7 +31,7 @@ MAX_NUMBERS = 3500
 
 WAITING_CHECK_NUM, WAITING_RESERVE_NUM = range(2)
 
-# Button Text Constants
+# Button Text Labels
 BTN_CHECK = "🔍 Check Number"
 BTN_LIST = "📋 List Numbers"
 BTN_RESERVE = "📌 Reserve Number"
@@ -113,13 +113,13 @@ def get_reserved_list():
     return [r[0] for r in rows]
 
 # ---------------------------------------------------------
-# CUSTOM KEYBOARD BUILDER
+# REPLY KEYBOARD BUILDER
 # ---------------------------------------------------------
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
-def build_custom_keyboard(user_id: int) -> ReplyKeyboardMarkup:
-    """Builds a persistent bottom custom keyboard layout."""
+def build_reply_keyboard(user_id: int) -> ReplyKeyboardMarkup:
+    """Builds a persistent bottom keyboard for the input field."""
     if is_admin(user_id):
         keyboard = [
             [KeyboardButton(BTN_CHECK), KeyboardButton(BTN_RESERVE)],
@@ -130,7 +130,9 @@ def build_custom_keyboard(user_id: int) -> ReplyKeyboardMarkup:
         keyboard = [
             [KeyboardButton(BTN_CHECK), KeyboardButton(BTN_LIST)]
         ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    # resize_keyboard=True makes buttons compact rather than full text-block size
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, persistent=True)
 
 # ---------------------------------------------------------
 # HANDLERS
@@ -140,8 +142,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     role = "👑 Admin" if is_admin(user.id) else "👤 User"
     
     await update.message.reply_text(
-        f"Welcome to Car Lottery Bot!\nRole: {role}\n\nUse the custom keyboard below to navigate:",
-        reply_markup=build_custom_keyboard(user.id)
+        f" Welcome to Car Lottery Bot!\nRole: {role}\n\nUse the reply keyboard at the bottom of your screen to select an option:",
+        reply_markup=build_reply_keyboard(user.id)
     )
     return ConversationHandler.END
 
@@ -149,27 +151,27 @@ async def menu_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_id = update.effective_user.id
     text = update.message.text
 
-    # Route: Check Number
+    # Action: Check Number
     if text == BTN_CHECK:
         await update.message.reply_text(
-            f"Please enter the ticket number you want to check (1 - {MAX_NUMBERS}):",
-            reply_markup=build_custom_keyboard(user_id)
+            f"Please reply with the ticket number you want to check (1 - {MAX_NUMBERS}):",
+            reply_markup=build_reply_keyboard(user_id)
         )
         return WAITING_CHECK_NUM
 
-    # Route: Reserve Number (Admin Only)
+    # Action: Reserve Number (Admin Only)
     elif text == BTN_RESERVE:
         if not is_admin(user_id):
-            await update.message.reply_text("⛔ **Access Denied**: Admins only.", reply_markup=build_custom_keyboard(user_id), parse_mode="Markdown")
+            await update.message.reply_text("⛔ **Access Denied**: Admins only.", reply_markup=build_reply_keyboard(user_id), parse_mode="Markdown")
             return ConversationHandler.END
             
         await update.message.reply_text(
-            f"Please enter the ticket number you want to reserve (1 - {MAX_NUMBERS}):",
-            reply_markup=build_custom_keyboard(user_id)
+            f"Please reply with the ticket number you want to reserve (1 - {MAX_NUMBERS}):",
+            reply_markup=build_reply_keyboard(user_id)
         )
         return WAITING_RESERVE_NUM
 
-    # Route: List Numbers
+    # Action: List Numbers
     elif text == BTN_LIST:
         avail, res = get_stats()
         await update.message.reply_text(
@@ -177,15 +179,15 @@ async def menu_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"• Total Tickets: {MAX_NUMBERS}\n"
             f"• Available: {avail}\n"
             f"• Reserved: {res}",
-            reply_markup=build_custom_keyboard(user_id),
+            reply_markup=build_reply_keyboard(user_id),
             parse_mode="Markdown"
         )
         return ConversationHandler.END
 
-    # Route: Reserved List (Admin Only)
+    # Action: Reserved List (Admin Only)
     elif text == BTN_RESERVED_LIST:
         if not is_admin(user_id):
-            await update.message.reply_text("⛔ **Access Denied**: Admins only.", reply_markup=build_custom_keyboard(user_id), parse_mode="Markdown")
+            await update.message.reply_text("⛔ **Access Denied**: Admins only.", reply_markup=build_reply_keyboard(user_id), parse_mode="Markdown")
             return ConversationHandler.END
 
         res_list = get_reserved_list()
@@ -194,13 +196,13 @@ async def menu_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             msg = f"📑 **Reserved Numbers ({len(res_list)} total):**\n" + ", ".join(map(str, res_list[:50]))
             
-        await update.message.reply_text(msg, reply_markup=build_custom_keyboard(user_id), parse_mode="Markdown")
+        await update.message.reply_text(msg, reply_markup=build_reply_keyboard(user_id), parse_mode="Markdown")
         return ConversationHandler.END
 
-    # Route: Lotto Status (Admin Only)
+    # Action: Lotto Status (Admin Only)
     elif text == BTN_STATUS:
         if not is_admin(user_id):
-            await update.message.reply_text("⛔ **Access Denied**: Admins only.", reply_markup=build_custom_keyboard(user_id), parse_mode="Markdown")
+            await update.message.reply_text("⛔ **Access Denied**: Admins only.", reply_markup=build_reply_keyboard(user_id), parse_mode="Markdown")
             return ConversationHandler.END
 
         avail, res = get_stats()
@@ -211,7 +213,7 @@ async def menu_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"• Available: {avail}\n"
             f"• Reserved: {res}\n"
             f"• Sales Progress: {pct:.1f}%",
-            reply_markup=build_custom_keyboard(user_id),
+            reply_markup=build_reply_keyboard(user_id),
             parse_mode="Markdown"
         )
         return ConversationHandler.END
@@ -228,7 +230,7 @@ async def process_check_number(update: Update, context: ContextTypes.DEFAULT_TYP
     if not text.isdigit() or not (1 <= int(text) <= MAX_NUMBERS):
         await update.message.reply_text(
             f"⚠️ Enter a valid number between 1 and {MAX_NUMBERS}:",
-            reply_markup=build_custom_keyboard(user_id)
+            reply_markup=build_reply_keyboard(user_id)
         )
         return WAITING_CHECK_NUM
 
@@ -236,7 +238,7 @@ async def process_check_number(update: Update, context: ContextTypes.DEFAULT_TYP
     record = get_ticket(num)
     status_msg = f"🟢 Ticket #{num} is AVAILABLE!" if record and record["status"] == "available" else f"🔴 Ticket #{num} is RESERVED."
     
-    await update.message.reply_text(status_msg, reply_markup=build_custom_keyboard(user_id))
+    await update.message.reply_text(status_msg, reply_markup=build_reply_keyboard(user_id))
     return ConversationHandler.END
 
 async def process_reserve_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -247,13 +249,13 @@ async def process_reserve_number(update: Update, context: ContextTypes.DEFAULT_T
         return await menu_navigation(update, context)
 
     if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin action required.", reply_markup=build_custom_keyboard(user_id))
+        await update.message.reply_text("⛔ Admin action required.", reply_markup=build_reply_keyboard(user_id))
         return ConversationHandler.END
 
     if not text.isdigit() or not (1 <= int(text) <= MAX_NUMBERS):
         await update.message.reply_text(
             f"⚠️ Enter a valid number between 1 and {MAX_NUMBERS}:",
-            reply_markup=build_custom_keyboard(user_id)
+            reply_markup=build_reply_keyboard(user_id)
         )
         return WAITING_RESERVE_NUM
 
@@ -261,17 +263,17 @@ async def process_reserve_number(update: Update, context: ContextTypes.DEFAULT_T
     if reserve_ticket(num, user_id):
         await update.message.reply_text(
             f"✅ Ticket #{num} successfully reserved in PostgreSQL!",
-            reply_markup=build_custom_keyboard(user_id)
+            reply_markup=build_reply_keyboard(user_id)
         )
     else:
         await update.message.reply_text(
             f"⚠️ Ticket #{num} is already reserved!",
-            reply_markup=build_custom_keyboard(user_id)
+            reply_markup=build_reply_keyboard(user_id)
         )
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Cancelled.", reply_markup=build_custom_keyboard(update.effective_user.id))
+    await update.message.reply_text("Cancelled.", reply_markup=build_reply_keyboard(update.effective_user.id))
     return ConversationHandler.END
 
 # ---------------------------------------------------------
@@ -299,7 +301,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv_handler)
 
-    print("🚀 Custom Keyboard Bot running with PostgreSQL persistence...")
+    print("🚀 Reply Keyboard Bot running...")
     app.run_polling()
 
 if __name__ == "__main__":
